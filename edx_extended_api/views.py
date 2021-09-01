@@ -3,14 +3,13 @@ from __future__ import unicode_literals
 
 from rest_framework import generics, viewsets, mixins, status
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from openedx.core.lib.api.authentication import OAuth2AuthenticationAllowInactiveUser
-from serializers import CourseSerializer, UserSerializer, RetrieveListUserSerializer, UserProgressSerializer
-from django.contrib.auth import get_user_model
 from django.utils.translation import gettext_lazy as _
 from openedx.core.djangoapps.content.course_overviews.models import CourseOverview
+from openedx.core.djangoapps.site_configuration import helpers as configuration_helpers
 
-User = get_user_model()
+from .serializers import CourseSerializer, UserSerializer, RetrieveListUserSerializer, UserProgressSerializer
+from .permissions import IsStaffAndOrgMember
 
 
 class ByUsernameMixin:
@@ -18,13 +17,21 @@ class ByUsernameMixin:
 
 
 class UserFilterMixin:
+    queryset_filter = {}
     filter_by_supervisor = False
 
     def get_queryset(self):
         """
         Restricts the returned users, by filtering by `user_id` query parameter.
         """
-        queryset = User.objects.all()
+        course_org_filter = configuration_helpers.get_current_site_orgs() or []
+        queryset = self.serializer_class.Meta.model.objects.filter(
+            profile__org__in=course_org_filter
+        ).exclude(
+            profile__org=None
+        ).exclude(
+            profile__org=''
+        )
         user_ids = [int(_id) for _id in self.request.query_params.get('user_id', '').split(',') if _id.strip().isdigit()]
         usernames = [u.strip() for u in self.request.query_params.get('username', '').split(',') if u.strip()]
 
@@ -40,9 +47,8 @@ class UserFilterMixin:
 
 
 class UsersViewSet(UserFilterMixin, viewsets.ModelViewSet):
-    queryset_filter = {}
     authentication_classes = (OAuth2AuthenticationAllowInactiveUser,)
-    permission_classes = (IsAuthenticated,)
+    permission_classes = (IsStaffAndOrgMember,)
     serializer_class = UserSerializer
 
     DEACTIVATE_STATUSES = {
@@ -57,7 +63,9 @@ class UsersViewSet(UserFilterMixin, viewsets.ModelViewSet):
         lookup_field = self.lookup_url_kwarg or self.lookup_field
         lookup_filter = {lookup_field: self.kwargs.get(lookup_field)}
 
+        _status = status.HTTP_409_CONFLICT
         if lookup_filter[lookup_field] and not queryset.filter(**lookup_filter).exists():
+            _status = status.HTTP_404_NOT_FOUND
             resp = {'status': 'user_not_found'}
         elif lookup_filter[lookup_field] and queryset.filter(is_active=False, **lookup_filter).exists():
             resp = {'status': 'user_inactive'}
@@ -68,7 +76,7 @@ class UsersViewSet(UserFilterMixin, viewsets.ModelViewSet):
         else:
             return resp
 
-        return Response(resp, status=status.HTTP_409_CONFLICT)
+        return Response(resp, status=_status)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -161,13 +169,31 @@ class UsersByUsernameViewSet(ByUsernameMixin, UsersViewSet):
 
 
 class CoursesViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    authentication_classes = (OAuth2AuthenticationAllowInactiveUser,)
+    permission_classes = (IsStaffAndOrgMember,)
     serializer_class = CourseSerializer
-    queryset = CourseOverview.objects.all()
+
+    def get_queryset(self):
+        course_org_filter = configuration_helpers.get_current_site_orgs() or []
+        return self.serializer_class.Meta.model.objects.filter(org__in=course_org_filter).exclude(org=None).exclude(org='')
 
 
 class UserProgressViewSet(UserFilterMixin, mixins.RetrieveModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet):
+    authentication_classes = (OAuth2AuthenticationAllowInactiveUser,)
+    permission_classes = (IsStaffAndOrgMember,)
     serializer_class = UserProgressSerializer
     filter_by_supervisor = True
+
+    def get_queryset(self):
+        course_org_filter = configuration_helpers.get_current_site_orgs() or []
+        queryset = self.serializer_class.Meta.model.objects.filter(
+            profile__org__in=course_org_filter
+        ).exclude(
+            profile__org=None
+        ).exclude(
+            profile__org=''
+        )
+        return queryset
 
 
 class UserProgressByUsernameViewSet(ByUsernameMixin, UserProgressViewSet):
